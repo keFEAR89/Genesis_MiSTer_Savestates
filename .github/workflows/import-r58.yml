@@ -1,0 +1,116 @@
+name: Import R58 source release
+
+on:
+  push:
+    paths:
+      - '.github/workflows/import-r58.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-r58:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download final R58 tree from Google Drive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --disable-pip-version-check gdown
+          rm -rf /tmp/r58-drive
+          mkdir -p /tmp/r58-drive
+          gdown --folder 'https://drive.google.com/drive/folders/1HS2n_-0A_UdrUslBx4c3my1q3TbseSbV?usp=drive_link' -O /tmp/r58-drive --remaining-ok
+
+          GENESIS_FILE="$(find /tmp/r58-drive -type f -name Genesis.sv -print -quit)"
+          if [ -z "$GENESIS_FILE" ]; then
+            echo 'Genesis.sv was not found in the downloaded Drive tree.' >&2
+            exit 1
+          fi
+          SRC_ROOT="$(dirname "$GENESIS_FILE")"
+          echo "R58 source root: $SRC_ROOT"
+
+          for f in Genesis.sv Genesis.qpf Genesis.qsf Genesis.sdc files.qip build_id.v clean.bat .gitignore LICENSE README_R58_RU.md R58_SOURCE_MANIFEST.json R58_changes.diff; do
+            test -e "$SRC_ROOT/$f" || { echo "Missing required file: $f" >&2; exit 1; }
+          done
+          test -d "$SRC_ROOT/rtl" || { echo 'Missing rtl/' >&2; exit 1; }
+          test -d "$SRC_ROOT/sys" || { echo 'Missing sys/' >&2; exit 1; }
+          test -f "$SRC_ROOT/output_files/Genesis_SS.rbf" || { echo 'Missing output_files/Genesis_SS.rbf' >&2; exit 1; }
+
+          rm -rf /tmp/r58-release
+          mkdir -p /tmp/r58-release
+          cp "$SRC_ROOT/Genesis.sv" /tmp/r58-release/
+          cp "$SRC_ROOT/Genesis.qpf" /tmp/r58-release/
+          cp "$SRC_ROOT/Genesis.qsf" /tmp/r58-release/
+          cp "$SRC_ROOT/Genesis.sdc" /tmp/r58-release/
+          cp "$SRC_ROOT/files.qip" /tmp/r58-release/
+          cp "$SRC_ROOT/build_id.v" /tmp/r58-release/
+          cp "$SRC_ROOT/clean.bat" /tmp/r58-release/
+          cp "$SRC_ROOT/.gitignore" /tmp/r58-release/
+          cp "$SRC_ROOT/LICENSE" /tmp/r58-release/
+          cp "$SRC_ROOT/README.md" /tmp/r58-release/README_UPSTREAM.md || true
+          cp "$SRC_ROOT/README_R58_RU.md" /tmp/r58-release/
+          cp "$SRC_ROOT/R58_SOURCE_MANIFEST.json" /tmp/r58-release/
+          cp "$SRC_ROOT/R58_changes.diff" /tmp/r58-release/
+          cp -a "$SRC_ROOT/rtl" /tmp/r58-release/
+          cp -a "$SRC_ROOT/sys" /tmp/r58-release/
+          cp "$SRC_ROOT/output_files/Genesis_SS.rbf" /tmp/r58-release/Genesis_SS.rbf
+
+      - name: Create public README
+        shell: bash
+        run: |
+          cat > /tmp/r58-release/README.md <<'EOF'
+          # Genesis MiSTer — Savestates R58
+
+          Community-oriented R58 build of the archived **MiSTer-devel/Genesis_MiSTer** core with working save/load state support integrated into the FPGA core.
+
+          ## What this repository contains
+
+          - complete Quartus project sources used for R58;
+          - savestate implementation under `rtl/savestate/`;
+          - the integrated Genesis/VDP/system changes required by the feature;
+          - `R58_SOURCE_MANIFEST.json` for source verification;
+          - `R58_changes.diff` for the R57 → R58 development step;
+          - `Genesis_SS.rbf`, the tested R58 MiSTer core binary;
+          - the original upstream README as `README_UPSTREAM.md`;
+          - detailed Russian R58 notes in `README_R58_RU.md`.
+
+          ## Using savestates
+
+          Load the included `Genesis_SS.rbf` on MiSTer and use the savestate controls exposed by the core menu. R58 stores the savestate image in external DDR and validates the stored image before restore.
+
+          ## Building
+
+          The project is intended for **Quartus Prime 18.1 Standard**. Open `Genesis.qpf`, use revision `Genesis`, and perform a full compilation. The development build used 6 parallel processors.
+
+          Timing and synthesis results must always be checked for a newly compiled RBF; do not assume they are identical to the supplied binary.
+
+          ## Project history
+
+          The base core is the archived [MiSTer-devel/Genesis_MiSTer](https://github.com/MiSTer-devel/Genesis_MiSTer) project. Savestate support was developed incrementally and hardware-tested on MiSTer before this R58 source release.
+
+          ## Development
+
+          R58 is published so the implementation can be inspected, improved and extended by the MiSTer community. Useful future work includes broader mapper/peripheral coverage, special-hardware edge cases, standard MiSTer savestate UI/slot integration and further compatibility testing.
+
+          ## License
+
+          This repository retains the upstream `LICENSE` and source copyright notices. Please preserve the applicable notices when redistributing or modifying the project.
+          EOF
+
+      - name: Replace repository with clean R58 release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/r58-release/. .
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import R58 Genesis MiSTer savestate source release [skip ci]'
+          git push origin HEAD:main

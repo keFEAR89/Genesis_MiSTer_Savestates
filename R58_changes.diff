@@ -1,0 +1,476 @@
+--- R57/Genesis.sv
++++ R58/Genesis.sv
+@@ -182,7 +182,7 @@
+ assign BUTTONS   = osd_btn;
+ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
+ 
+-wire [63:0] status;
++wire [127:0] status;
+ wire ss_freeze_ack;
+ wire ss_mem_test_freeze;
+ wire ss_mem_test_busy;
+@@ -356,7 +356,7 @@
+ 
+ `include "build_id.v"
+ localparam CONF_STR = {
+-	"Genesis;UART31250,MIDI;",
++	"Genesis;SS3E100000:40000,UART31250,MIDI;",
+ 	"FS,BINGENMD ;",
+ 	"-;",
+ 	"O67,Region,JP,US,EU;",
+@@ -366,6 +366,10 @@
+ 	"C,Cheats;",
+ 	"H1OO,Cheats Enabled,Yes,No;",
+ 	"-;",
++    "O[65:64],Savestate Slot,1,2,3,4;",
++    "DARC,Save State;",
++    "DARM,Load State;",
++    "-;",
+ 	"OD,Autosave,Off,On;",
+ 	"H6D0RG,Load Backup RAM;",
+ 	"H6D0RH,Save Backup RAM;",
+@@ -416,8 +420,7 @@
+ 	"P3oT,SS VDP Restore Test (No Audio),Off,On;",
+ 	"P3oU,SS VDP Full Replay Test,Off,On;",
+ 	"P3oV,SS DDR Transport Ping Test,Off,On;",
+-    "P3OC,SS Save Slot,Off,On;",
+-    "P3OM,SS Load Slot,Off,On;",
++
+ 	"P3-;",
+ 
+ 	"-;",
+@@ -425,7 +428,7 @@
+ 	"H3o1,Enable PSG,Yes,No;",
+ 	"H3-;",
+     "P4,SS Status;",
+-    "P4-,R57 fix8;",
++    "P4-,R58 files v1;",
+     "H7P4-,SAVE seen: No;",
+     "h7P4-,SAVE seen: Yes;",
+     "H8P4-,LOAD seen: No;",
+@@ -460,8 +463,8 @@
+     "hBhChDHEhFP4-,Error: Z80 state mismatch;",
+     "HBHCHDhEhFP4-,Error: VDP active wait timeout;",
+     "hBHCHDhEhFP4-,Error: VDP blank wait timeout;",
+-    "HBhCHDhEhFP4-,Error: Unknown code;",
+-    "hBhCHDhEhFP4-,Error: Unknown code;",
++    "HBhCHDhEhFP4-,Error: Different ROM;",
++    "hBhCHDhEhFP4-,Error: Different settings;",
+     "HBHChDhEhFP4-,Error: Unknown code;",
+     "hBHChDhEhFP4-,Error: Unknown code;",
+     "HBhChDhEhFP4-,Error: Unknown code;",
+@@ -470,7 +473,7 @@
+ 	"J1,A,B,C,Start,Mode,X,Y,Z;",
+ 	"jn,A,B,R,Start,Select,X,Y,L;", // name map to SNES layout.
+ 	"jp,Y,B,A,Start,Select,L,X,R;", // positional map to SNES layout (3 button friendly)
+-	"V,v",`BUILD_DATE," R57 fix8"
++	"V,v",`BUILD_DATE," R58 files v1"
+ };
+ 
+ wire  [1:0] buttons;
+@@ -520,7 +523,7 @@
+ 	.new_vmode(new_vmode),
+ 
+ 	.status(status),
+-	.status_in({status[63:8],region_req,status[5:0]}),
++	.status_in({status[127:8],region_req,status[5:0]}),
+ 	.status_set(region_set),
+ 	.status_menumask({ss_diag_error,ss_persist_busy,ss_slot_valid,ss_diag_load_seen,ss_diag_save_seen,status[13],en216p,!gun_mode,~dbg_menu,status[8],~gg_available,~bk_ena}),
+ 
+@@ -556,6 +559,15 @@
+ wire code_index = &ioctl_index;
+ wire cart_download = ioctl_download & ~code_index;
+ wire code_download = ioctl_download & code_index;
++
++// CRC of the actual ROM download, retained through game resets.
++wire [63:0] ss_rom_identity;
++wire ss_rom_ready;
++ss_rom_identity ss_rom_identity_inst (
++    .clk(clk_sys), .download(cart_download), .wr(ioctl_wr),
++    .addr(ioctl_addr), .data(ioctl_data),
++    .identity(ss_rom_identity), .ready(ss_rom_ready)
++);
+ 
+ reg osd_btn = 0;
+ always @(posedge clk_sys) begin
+@@ -736,9 +748,12 @@
+ ss_slot_engine ss_slot_engine (
+     .clk(clk_sys), .reset(reset_base | cart_download),
+     .save_cmd(status[12]), .load_cmd(status[22]), .ping_cmd(status[63]),
++    .selected_slot(status[65:64]), .rom_identity(ss_rom_identity),
++    // Region [7:6], controller mode [5], CPU turbo [26:25], sprite limit [31].
++    .config_identity(status[63:0] & 64'h00000000860000E0),
+     .blocked((|status[62:57]) | ss_snapshot_busy | ss_m68k_test_busy |
+              ss_mem_test_busy | ss_z80_test_busy | ss_freeze_ack),
+-    .supported(ss_slot_supported),
++    .supported(ss_slot_supported && ss_rom_ready),
+     .orch_start(ss_persist_orch_start),
+     .persistent_enable(ss_persist_orch_enable),
+     .persistent_ready(ss_persist_orch_ready), .persistent_bad(ss_slot_bad),
+@@ -1392,7 +1407,7 @@
+         end
+         if (ss_persist_fail && !ss_diag_fail_old)
+             ss_diag_error <= ss_slot_error == 8'h05 && ss_capture_error != 0 ?
+-                             5'd15 + {1'b0,ss_capture_error} : {1'b0,ss_slot_error[3:0]};
++                             5'd15 + {1'b0,ss_capture_error} : ss_slot_error[4:0];
+         // Preserve evidence if an external/core reset erased the slot error.
+         // If sources overlap, report backup > region > menu/button > HPS.
+         if (reset_base && !ss_diag_reset_old &&
+--- R57/files.qip
++++ R58/files.qip
+@@ -34,3 +34,5 @@
+ set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate/ss_persistent_export.sv
+ 
+ set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate/ss_slot_engine.sv
++
++set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate/ss_rom_identity.sv
+--- R57/rtl/savestate/ss_slot_engine.sv
++++ R58/rtl/savestate/ss_slot_engine.sv
+@@ -1,8 +1,10 @@
+-// R57 / v1.6B. Single DDR slot; one 64-bit transfer buffer, no bulk image RAM.
++// R58. Four MiSTer file-backed DDR slots. Capture/import remain R57 fix8.
+ // DDR ping retains its R56 pattern, address and non-freezing operation.
+ module ss_slot_engine (
+     input wire clk, reset,
+     input wire save_cmd, load_cmd, ping_cmd, blocked, supported,
++    input wire [1:0] selected_slot,
++    input wire [63:0] rom_identity, config_identity,
+     output reg orch_start,
+     output wire persistent_enable,
+     input wire persistent_ready, persistent_bad,
+@@ -21,21 +23,36 @@
+     output wire [7:0] ddr_be,
+     input wire [63:0] ddr_dout,
+     input wire ddr_ack,
+-    output reg busy, pass, fail, slot_valid,
++    output reg busy, pass, fail,
++    output wire slot_valid,
+     output wire recover_reset,
+     output reg [31:0] source_crc, checked_crc,
+     output reg [7:0] error_code
+ );
+ localparam [31:0] PAYLOAD_BYTES = 32'h00022800;
+-// Private DDR base = 0x3E000000. Keep ping word zero separate from slot.
+-localparam [21:0] HEADER_WORD = 22'h100;
+-localparam [21:0] PAYLOAD_WORD = 22'h102;
+-localparam [63:0] HEADER = {32'h52353753,16'h0001,16'h0001};
++// Physical base 0x3E100000, stride 0x40000; private DDR port base 0x3E000000.
++// +0: MiSTer {body_words, change_counter}; +8: format; +16: CRC/size;
++// +24: ROM identity; +32: machine configuration; +40: R57 payload.
++localparam [31:0] BODY_WORDS = (PAYLOAD_BYTES + 32'd32) / 4;
++localparam [63:0] HEADER = {32'h52353853,16'h0001,16'h0001};
++reg [1:0] active_slot = 0;
++wire [21:0] control_word = 22'h20000 + {5'd0,active_slot,15'd0};
++wire [21:0] header_word = control_word + 22'd1;
++wire [21:0] payload_word = control_word + 22'd5;
++reg slot_known = 0;
++assign slot_valid = slot_known && selected_slot == active_slot;
++reg [63:0] active_rom, active_config;
++reg [31:0] commit_counter;
++reg probing = 0;
++reg [19:0] probe_timer = 0;
++reg [2:0] deferred = 0;
+ localparam [4:0] IDLE=0, INVALID_WAIT=1, CAPTURE=2, SAVE_PRIME=3,
+     SAVE_BYTE=4, SAVE_SEND=5, SAVE_WAIT=6, READ_SEND=7, READ_WAIT=8,
+     READ_BYTE=9, META_WAIT=10, COMMIT_WAIT=11, HEADER_WAIT=12,
+     INFO_WAIT=13, RELEASE=14, FINISH=15, DRAIN=16,
+-    PING_WRITE=17, PING_READ=18, LOAD_CHECK_PRIME=19, LOAD_CHECK_BYTE=20;
++    PING_WRITE=17, PING_READ=18, LOAD_CHECK_PRIME=19, LOAD_CHECK_BYTE=20,
++    CONTROL_WAIT=21, ROM_WAIT=22, CONFIG_WAIT=23, SAVE_CONTROL_WAIT=24,
++    SAVE_ROM_WAIT=25, SAVE_CONFIG_WAIT=26, PUBLISH_WAIT=27;
+ reg [4:0] state = DRAIN;
+ reg save_old, load_old, ping_old;
+ reg do_load, do_ping, apply_load, verify_save;
+@@ -54,6 +71,8 @@
+     ack_sync <= ack_meta;
+ end
+ assign ddr_be = 8'hFF;
++wire [2:0] command_edge = {ping_cmd && !ping_old, load_cmd && !load_old, save_cmd && !save_old};
++wire [2:0] command_req = command_edge | deferred;
+ assign load_mode = do_load;
+ assign save_return = busy && !do_ping && !do_load;
+ assign persistent_enable = busy && !do_ping;
+@@ -84,14 +103,19 @@
+     save_old <= save_cmd;
+     load_old <= load_cmd;
+     ping_old <= ping_cmd;
++    // Only metadata probes may defer commands. Busy capture/restore never queues them.
++    if (probing) deferred <= deferred | command_edge;
+     persistent_done <= 0;
+     persistent_failed <= 0;
+     if (recovery_count != 0) recovery_count <= recovery_count - 1'b1;
+     if (reset) begin
+         state <= DRAIN;
+         // Never cancel/rebase an outstanding DDR toggle or its payload.
+-        busy <= 0; pass <= 0; fail <= 0; slot_valid <= 0;
++        busy <= 0; pass <= 0; fail <= 0; slot_known <= 0;
+         orch_start <= 0;
++        probing <= 0; deferred <= 0; probe_timer <= 0;
++        active_slot <= selected_slot; active_rom <= 0; active_config <= 0;
++        commit_counter <= 0;
+         do_load <= 0; do_ping <= 0; apply_load <= 0; verify_save <= 0;
+         capture_seen <= 0;
+         offset <= 0; lane <= 0; prime <= 0; transfer <= 0;
+@@ -103,31 +127,56 @@
+         case (state)
+             IDLE: begin
+                 busy <= 0; orch_start <= 0; watchdog <= 0;
+-                if ((save_cmd && !save_old) || (load_cmd && !load_old) ||
+-                    (ping_cmd && !ping_old)) begin
++                if (command_req != 0) begin
++                    deferred <= 0; probing <= 0;
+                     pass <= 0; fail <= 0; error_code <= 0;
+                     if (blocked || recover_reset || ack_sync != ddr_req ||
+-                        ((save_cmd && !save_old) && (load_cmd && !load_old))) begin
++                        (command_req != 3'b001 && command_req != 3'b010 && command_req != 3'b100)) begin
+                         fail <= 1; error_code <= 8'h01;
+-                    end else if (ping_cmd && !ping_old) begin
++                    end else if (command_req[2]) begin
+                         busy <= 1; do_ping <= 1; do_load <= 0; ping_index <= 0;
+                         ddr_rnw <= 0; ddr_addr <= 0; ddr_din <= ping_pattern(0);
+                         ddr_req <= ~ddr_req; state <= PING_WRITE;
+-                    end else if (!supported || ((load_cmd && !load_old) && !slot_valid)) begin
+-                        fail <= 1; error_code <= !supported ? 8'h02 : 8'h03;
++                    end else if (!supported) begin
++                        fail <= 1; error_code <= 8'h02;
+                     end else begin
+                         busy <= 1; do_ping <= 0; apply_load <= 0; verify_save <= 0;
+-                        capture_seen <= 0;
+-                        do_load <= load_cmd && !load_old;
++                        capture_seen <= 0; do_load <= command_req[1];
++                        active_slot <= selected_slot;
++                        active_rom <= rom_identity; active_config <= config_identity;
++                        slot_known <= 0;
+                         offset <= 0; lane <= 0; crc <= 32'hFFFFFFFF;
+-                        ddr_addr <= HEADER_WORD; ddr_req <= ~ddr_req;
+-                        if (load_cmd && !load_old) begin
+-                            ddr_rnw <= 1; state <= HEADER_WAIT;
+-                        end else begin
+-                            slot_valid <= 0;
+-                            ddr_rnw <= 0; ddr_din <= 0; state <= INVALID_WAIT;
+-                        end
++                        ddr_addr <= 22'h20000 + {5'd0,selected_slot,15'd0};
++                        ddr_req <= ~ddr_req; ddr_rnw <= 1;
++                        state <= command_req[1] ? CONTROL_WAIT : SAVE_CONTROL_WAIT;
+                     end
++                end else if (!blocked && supported && (probe_timer == 0 || selected_slot != active_slot)) begin
++                    // Read metadata after reset/slot selection and periodically. Main
++                    // restores files while loading the ROM; never erase those on reset.
++                    probing <= 1; do_ping <= 0; do_load <= 0;
++                    if (selected_slot != active_slot) slot_known <= 0;
++                    active_slot <= selected_slot;
++                    active_rom <= rom_identity; active_config <= config_identity;
++                    ddr_addr <= 22'h20000 + {5'd0,selected_slot,15'd0};
++                    ddr_req <= ~ddr_req; ddr_rnw <= 1; state <= CONTROL_WAIT;
++                end else probe_timer <= probe_timer + 1'b1;
++            end
++            SAVE_CONTROL_WAIT: if (ack_sync == ddr_req) begin
++                // Read the host's current counter (FFFFFFFF after ROM reload).
++                // Leave it unchanged until publication; zero size disables polling.
++                commit_counter <= ddr_dout[31:0] >= 32'hFFFFFFFE ? 32'd0 : ddr_dout[31:0]+32'd1;
++                ddr_rnw <= 0; ddr_din <= {32'd0,ddr_dout[31:0]};
++                ddr_req <= ~ddr_req; state <= INVALID_WAIT;
++            end
++            CONTROL_WAIT: if (ack_sync == ddr_req) begin
++                if (ddr_dout[63:32] != BODY_WORDS) begin
++                    slot_known <= 0;
++                    if (!probing) begin
++                        fail <= 1; error_code <= ddr_dout[63:32] == 0 ? 8'h03 : 8'h04;
++                    end
++                    state <= DRAIN;
++                end else begin
++                    ddr_addr <= header_word; ddr_req <= ~ddr_req; state <= HEADER_WAIT;
+                 end
+             end
+             INVALID_WAIT: if (ack_sync == ddr_req) begin
+@@ -135,16 +184,36 @@
+             end
+             HEADER_WAIT: if (ack_sync == ddr_req) begin
+                 if (ddr_dout != HEADER) begin
+-                    fail <= 1; slot_valid <= 0; error_code <= 8'h04; state <= DRAIN;
+-                end else begin
+-                    ddr_addr <= HEADER_WORD+1'b1; ddr_req <= ~ddr_req; state <= INFO_WAIT;
++                    slot_known <= 0; state <= DRAIN;
++                    if (!probing) begin fail <= 1; error_code <= 8'h04; end
++                end else begin
++                    ddr_addr <= header_word+1'b1; ddr_req <= ~ddr_req; state <= INFO_WAIT;
+                 end
+             end
+             INFO_WAIT: if (ack_sync == ddr_req) begin
+                 if (ddr_dout[31:0] != PAYLOAD_BYTES) begin
+-                    fail <= 1; slot_valid <= 0; error_code <= 8'h04; state <= DRAIN;
+-                end else begin
+-                    expected_crc <= ddr_dout[63:32]; state <= READ_SEND;
++                    slot_known <= 0; state <= DRAIN;
++                    if (!probing) begin fail <= 1; error_code <= 8'h04; end
++                end else begin
++                    expected_crc <= ddr_dout[63:32];
++                    ddr_addr <= control_word+22'd3; ddr_req <= ~ddr_req; state <= ROM_WAIT;
++                end
++            end
++            ROM_WAIT: if (ack_sync == ddr_req) begin
++                if (ddr_dout != active_rom) begin
++                    slot_known <= 0; state <= DRAIN;
++                    if (!probing) begin fail <= 1; error_code <= 8'h1A; end
++                end else begin
++                    ddr_addr <= control_word+22'd4; ddr_req <= ~ddr_req; state <= CONFIG_WAIT;
++                end
++            end
++            CONFIG_WAIT: if (ack_sync == ddr_req) begin
++                if (ddr_dout != active_config) begin
++                    slot_known <= 0; state <= DRAIN;
++                    if (!probing) begin fail <= 1; error_code <= 8'h1B; end
++                end else begin
++                    slot_known <= 1;
++                    state <= probing ? DRAIN : READ_SEND;
+                 end
+             end
+             CAPTURE: begin
+@@ -176,7 +245,7 @@
+                 else begin offset <= offset+1'b1; lane <= lane+1'b1; state <= SAVE_PRIME; end
+             end
+             SAVE_SEND: begin
+-                ddr_rnw <= 0; ddr_addr <= PAYLOAD_WORD + {7'd0,offset[17:3]};
++                ddr_rnw <= 0; ddr_addr <= payload_word + {7'd0,offset[17:3]};
+                 ddr_din <= transfer; ddr_req <= ~ddr_req; state <= SAVE_WAIT;
+             end
+             SAVE_WAIT: if (ack_sync == ddr_req) begin
+@@ -189,7 +258,7 @@
+                 end
+             end
+             READ_SEND: begin
+-                ddr_rnw <= 1; ddr_addr <= PAYLOAD_WORD + {7'd0,offset[17:3]};
++                ddr_rnw <= 1; ddr_addr <= payload_word + {7'd0,offset[17:3]};
+                 ddr_req <= ~ddr_req; state <= READ_WAIT;
+             end
+             READ_WAIT: if (ack_sync == ddr_req) begin
+@@ -201,14 +270,14 @@
+                 if (last_byte) begin
+                     checked_crc <= ~read_crc_next;
+                     if (~read_crc_next != expected_crc) begin
+-                        fail <= 1; slot_valid <= 0; error_code <= 8'h06;
++                        fail <= 1; slot_known <= 0; error_code <= 8'h06;
+                         if (apply_load) recovery_count <= 9'd511;
+                         else if (verify_save) begin
+                             persistent_done <= 1; persistent_failed <= 1;
+                         end
+                         state <= verify_save ? FINISH : DRAIN;
+                     end else if (verify_save) begin
+-                        ddr_rnw <= 0; ddr_addr <= HEADER_WORD+1'b1;
++                        ddr_rnw <= 0; ddr_addr <= header_word+1'b1;
+                         ddr_din <= {expected_crc,PAYLOAD_BYTES};
+                         ddr_req <= ~ddr_req; state <= META_WAIT;
+                     end else if (!apply_load) begin
+@@ -237,7 +306,7 @@
+                     if (~crc_byte(crc,mem_dout) != expected_crc) begin
+                         // The live RAM was already overwritten: recovery reset
+                         // is necessary, but retain a distinct diagnostic reason.
+-                        fail <= 1; pass <= 0; slot_valid <= 0;
++                        fail <= 1; pass <= 0; slot_known <= 0;
+                         error_code <= 8'h0B; recovery_count <= 9'd511;
+                         orch_start <= 0; state <= DRAIN;
+                     end else state <= RELEASE;
+@@ -246,18 +315,33 @@
+                 end
+             end
+             META_WAIT: if (ack_sync == ddr_req) begin
+-                ddr_addr <= HEADER_WORD; ddr_din <= HEADER;
++                ddr_addr <= control_word+22'd3; ddr_din <= active_rom;
++                ddr_req <= ~ddr_req; state <= SAVE_ROM_WAIT;
++            end
++            SAVE_ROM_WAIT: if (ack_sync == ddr_req) begin
++                ddr_addr <= control_word+22'd4; ddr_din <= active_config;
++                ddr_req <= ~ddr_req; state <= SAVE_CONFIG_WAIT;
++            end
++            SAVE_CONFIG_WAIT: if (ack_sync == ddr_req) begin
++                ddr_addr <= header_word; ddr_din <= HEADER;
+                 ddr_req <= ~ddr_req; state <= COMMIT_WAIT;
+             end
+-            COMMIT_WAIT: if (ack_sync == ddr_req) begin
+-                slot_valid <= 1; state <= RELEASE;
+-            end
++            COMMIT_WAIT: if (ack_sync == ddr_req) state <= RELEASE;
+             RELEASE: begin persistent_done <= 1; state <= FINISH; end
+             FINISH: if (!orch_busy) begin
++                orch_start <= 0;
+                 if (orch_fail || !orch_pass || (do_load && sys_fail)) begin
+-                    fail <= 1; pass <= 0; error_code <= 8'h07; slot_valid <= 0;
+-                end else pass <= !fail;
+-                orch_start <= 0; state <= DRAIN;
++                    fail <= 1; pass <= 0; error_code <= 8'h07; slot_known <= 0;
++                    state <= DRAIN;
++                end else if (!fail && !do_load) begin
++                    // Last write only: Main now has a complete, verified image.
++                    // Never publish failed captures or a failed CPU return.
++                    ddr_addr <= control_word; ddr_din <= {BODY_WORDS,commit_counter};
++                    ddr_rnw <= 0; ddr_req <= ~ddr_req; state <= PUBLISH_WAIT;
++                end else begin pass <= !fail; state <= DRAIN; end
++            end
++            PUBLISH_WAIT: if (ack_sync == ddr_req) begin
++                slot_known <= 1; pass <= 1; state <= DRAIN;
+             end
+             PING_WRITE: if (ack_sync == ddr_req) begin
+                 ddr_rnw <= 1; ddr_req <= ~ddr_req; state <= PING_READ;
+@@ -275,18 +359,18 @@
+                 end
+             end
+             DRAIN: begin
+-                busy <= 0; orch_start <= 0;
++                busy <= 0; orch_start <= 0; probing <= 0; probe_timer <= 1;
+                 if (ddr_req == ack_sync && !recover_reset) state <= IDLE;
+             end
+             default: begin
+-                fail <= 1; error_code <= 8'h09; slot_valid <= 0;
++                fail <= 1; error_code <= 8'h09; slot_known <= 0;
+                 recovery_count <= 9'd511; orch_start <= 0; state <= DRAIN;
+             end
+         endcase
+         // End-to-end bound includes capture, all DDR waits, VBlank and replay.
+         // ~2.5 s at MCLK. Never strand FX68K reset or audio/Z80 paused.
+         if (&watchdog && state != IDLE && state != DRAIN) begin
+-            fail <= 1; pass <= 0; error_code <= 8'h0A; slot_valid <= 0;
++            fail <= 1; pass <= 0; error_code <= 8'h0A; slot_known <= 0;
+             if (orch_start) recovery_count <= 9'd511;
+             orch_start <= 0; state <= DRAIN;
+         end
+--- R57/rtl/savestate/ss_rom_identity.sv
++++ R58/rtl/savestate/ss_rom_identity.sv
+@@ -0,0 +1,38 @@
++// ROM identity for persistent states. Process one byte per clock to bound CRC depth.
++// hps_io WIDE=1 produces isolated word strobes; reject overlapping/nonlinear input.
++module ss_rom_identity (
++    input wire clk, download, wr,
++    input wire [24:0] addr,
++    input wire [15:0] data,
++    output wire [63:0] identity,
++    output reg ready = 0
++);
++reg old_download = 0, pending = 0, invalid = 0;
++reg [7:0] high_byte = 0;
++reg [31:0] crc = 32'hFFFFFFFF;
++reg [25:0] length = 0;
++function automatic [31:0] crc_byte(input [31:0] c_in, input [7:0] b);
++    reg [31:0] c;
++    integer i;
++    begin
++        c = c_in ^ {24'd0,b};
++        for (i=0;i<8;i=i+1) c = c[0] ? (c>>1)^32'hEDB88320 : c>>1;
++        crc_byte = c;
++    end
++endfunction
++assign identity = {6'd0,length,~crc};
++always @(posedge clk) begin
++    old_download <= download;
++    if (download && !old_download) begin
++        ready <= 0; invalid <= 0; crc <= 32'hFFFFFFFF; length <= 0; pending <= 0;
++    end
++    if (pending) begin crc <= crc_byte(crc,high_byte); pending <= 0; end
++    if (download && wr) begin
++        if (pending || (old_download && {1'b0,addr} != length) || (!old_download && addr != 0)) invalid <= 1;
++        crc <= crc_byte(old_download ? crc : 32'hFFFFFFFF,data[7:0]);
++        high_byte <= data[15:8]; pending <= 1;
++        length <= {1'b0,addr} + 26'd2;
++    end
++    if (!download && !pending && length != 0 && !invalid) ready <= 1;
++end
++endmodule

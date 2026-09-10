@@ -24,7 +24,7 @@ jobs:
           python -m pip install --quiet --disable-pip-version-check gdown
           rm -rf /tmp/r58-drive
           mkdir -p /tmp/r58-drive
-          gdown --folder 'https://drive.google.com/drive/folders/1HS2n_-0A_UdrUslBx4c3my1q3TbseSbV?usp=drive_link' -O /tmp/r58-drive --remaining-ok
+          gdown --folder 'https://drive.google.com/drive/folders/1HS2n_-0A_UdrUslBx4c3my1q3TbseSbV?usp=drive_link' -O /tmp/r58-drive
 
           GENESIS_FILE="$(find /tmp/r58-drive -type f -name Genesis.sv -print -quit)"
           if [ -z "$GENESIS_FILE" ]; then
